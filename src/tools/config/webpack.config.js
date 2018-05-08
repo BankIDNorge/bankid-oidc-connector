@@ -30,6 +30,9 @@ module.exports = {
         alias: {}
     },
     plugins: [
+        new webpack.ProvidePlugin( {
+            Promise: ['es6-promise', 'Promise']
+        } ),
         new webpack.IgnorePlugin( /vertx/ ),
     ],
     devtool: 'source-map',

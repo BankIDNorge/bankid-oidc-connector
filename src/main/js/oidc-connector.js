@@ -27,7 +27,8 @@
  * @property {String} grant_type
  * @property {String} token_url
  * @property {String} userinfo_url
- * @property {String} oauth_url
+ * @property {String} oidc_url
+ * @property {String} oauth_url Deprecated since 1.3.1
  * @property {String} method
  * @property {String} client_id
  * @property {String} login_hint
@@ -68,34 +69,13 @@
 import EVENT_CONSTANTS from './constants/event.constants';
 import XDM_CONSTANTS from './constants/xdm.constants';
 
-import OIDCConfig from './config/oidc.config';
-import ConnectorConfig from './config/connector.config';
+import CLIENT_CONFIG from './config/oidc.config';
+import CONFIG from './config/connector.config';
 
 import DomHelper from './helper/dom-helper';
 
 ( function ( context ) {
     const TAG = 'OIDC-Connector';
-    const CLIENT_CONFIG = new OIDCConfig( {
-        scope: 'openid',
-        response_mode: 'query',
-        response_type: 'code',
-        redirect_uri: '',
-        ui_locales: 'nb',
-        acr_values: '4',
-        nonce: DomHelper.createRandomHexString(),
-        state: 'untouched',
-        login_hint: '',
-        id_token_hint: '',
-        prompt: ''
-    } );
-    const CONFIG = new ConnectorConfig( {
-        method: 'redirect',
-        // eslint-disable-next-line no-undef
-        oauth_url: OAUTH_URL,
-        grant_type: 'authorization_code',
-        userinfo_url: '',
-        token_url: ''
-    } );
 
     let loginWindow;
 
@@ -110,6 +90,27 @@ import DomHelper from './helper/dom-helper';
         return Object.assign( CLIENT_CONFIG, override_config );
     }
 
+    function _doGetOIDCConfig( url ) {
+        return new Promise( ( fulfill ) => {
+            if ( url ) {
+                DomHelper.doGet( url, ( err, data ) => {
+                    if ( err ) {
+                        console.error( err );
+                    }
+
+                    if ( data && data.authorization_endpoint ) {
+                        CONFIG.oauth_url = data.authorization_endpoint;
+                    }
+
+                    console.log( 'Data retrieved from OIDC:', data );
+                    fulfill();
+                } );
+            } else {
+                fulfill();
+            }
+        } );
+    }
+
     /**
      * Generate the URL to the OAUTH2 Authorize endpoint from oauth_url and configuration parameters
      *
@@ -118,6 +119,9 @@ import DomHelper from './helper/dom-helper';
      * @private
      */
     function _createAuthorizeClientUrl( clientConfig ) {
+        if ( !CONFIG.oauth_url ) {
+            throw Error( `[${TAG}] doConnect - URL to authorization_endpoint missing. Send in oidc_url in OIDC.doInit() to point to a valid openid-configuration.` );
+        }
         const objectUrl = DomHelper.serializeConfigToURL( clientConfig );
         return `${CONFIG.oauth_url}?${objectUrl}`;
     }
@@ -126,8 +130,10 @@ import DomHelper from './helper/dom-helper';
      * OIDC Connector onLoad handler.
      */
     function onLoad() {
-        _doPolyfill();
-        _doSendLoadedEvent();
+        _doPolyfill()
+            .then( _doGetOIDCConfig.bind( null, CONFIG.oidc_url ) )
+            .then( _doSendLoadedEvent )
+            .catch( ( err ) => { console.error( err ); } );
     }
 
     /**
@@ -135,20 +141,24 @@ import DomHelper from './helper/dom-helper';
      * @private
      */
     function _doPolyfill() {
-        // custom event polyfill
-        if ( typeof window.CustomEvent === 'function' ) {
-            return false;
-        }
+        return new Promise( ( fulfill ) => {
+            // custom event polyfill
+            if ( typeof window.CustomEvent === 'function' ) {
+                fulfill();
+                return;
+            }
 
-        function CustomEvent( event, params ) {
-            params = params || { bubbles: false, cancelable: false, detail: undefined };
-            const evt = document.createEvent( 'CustomEvent' );
-            evt.initCustomEvent( event, params.bubbles, params.cancelable, params.detail );
-            return evt;
-        }
+            function CustomEvent( event, params ) {
+                params = params || { bubbles: false, cancelable: false, detail: undefined };
+                const evt = document.createEvent( 'CustomEvent' );
+                evt.initCustomEvent( event, params.bubbles, params.cancelable, params.detail );
+                return evt;
+            }
 
-        CustomEvent.prototype = window.Event.prototype;
-        window.CustomEvent = CustomEvent;
+            CustomEvent.prototype = window.Event.prototype;
+            window.CustomEvent = CustomEvent;
+            fulfill();
+        } );
     }
 
     /**
@@ -156,7 +166,10 @@ import DomHelper from './helper/dom-helper';
      * @private
      */
     function _doSendLoadedEvent() {
-        document.body.dispatchEvent( new window.CustomEvent( EVENT_CONSTANTS.LOADED_EVENT ) );
+        return new Promise( ( fulfill ) => {
+            document.body.dispatchEvent( new window.CustomEvent( EVENT_CONSTANTS.LOADED_EVENT ) );
+            fulfill();
+        } );
     }
 
     /**
@@ -379,12 +392,20 @@ import DomHelper from './helper/dom-helper';
             throw Error( `[${TAG}] doInit - missing configuration. You need to pass a configuration object.` );
         }
 
-        CONFIG.oauth_url = config.oauth_url || CONFIG.oauth_url;
-        CONFIG.grant_type = config.grant_type || CONFIG.grant_type;
-        CONFIG.method = config.method || CONFIG.method;
-        CONFIG.token_url = config.token_url || CONFIG.token_url;
-        CONFIG.userinfo_url = config.userinfo_url || CONFIG.userinfo_url;
+        if ( config.oauth_url ) {
+            console.warn( `[${TAG}] doInit - oauth_url parameter is deprecated and has no effect as it is automatically populated from OpenID Configuration. To override, pass oidc_url to valid openid-configuration JSON` );
+        }
 
+        if ( config.oidc_url ) {
+            _doGetOIDCConfig( config.oidc_url )
+                .catch( ( err ) => { throw err; } )
+                .then( updateConfig.bind( null, config ) );
+        } else {
+            updateConfig( config );
+        }
+    }
+
+    function updateConfig( config ) {
         const allowedMethods = ['window', 'redirect', 'inline'];
 
         if ( allowedMethods.indexOf( CONFIG.method ) === -1 ) {
@@ -395,18 +416,8 @@ import DomHelper from './helper/dom-helper';
             throw Error( `[${TAG}] doInit - missing required parameter client_id.` );
         }
 
-        CLIENT_CONFIG.login_hint = config.login_hint || CLIENT_CONFIG.login_hint;
-        CLIENT_CONFIG.id_token_hint = config.id_token_hint || CLIENT_CONFIG.id_token_hint;
-        CLIENT_CONFIG.prompt = config.prompt || CLIENT_CONFIG.prompt;
-        CLIENT_CONFIG.client_id = config.client_id;
-        CLIENT_CONFIG.scope = config.scope || CLIENT_CONFIG.scope;
-        CLIENT_CONFIG.response_mode = config.response_mode || CLIENT_CONFIG.response_mode;
-        CLIENT_CONFIG.response_type = config.response_type || CLIENT_CONFIG.response_type;
-        CLIENT_CONFIG.redirect_uri = config.redirect_uri || CLIENT_CONFIG.redirect_uri;
-        CLIENT_CONFIG.state = config.state || CLIENT_CONFIG.state;
-        CLIENT_CONFIG.ui_locales = config.ui_locales || CLIENT_CONFIG.ui_locales;
-        CLIENT_CONFIG.acr_values = config.acr_values || CLIENT_CONFIG.acr_values;
-        CLIENT_CONFIG.nonce = config.nonce || CLIENT_CONFIG.nonce;
+        CONFIG.update( config );
+        CLIENT_CONFIG.update( config );
     }
 
     /**
